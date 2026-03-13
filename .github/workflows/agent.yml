@@ -15,8 +15,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-      workflows: write # Fixed: Perms to push workflow changes if needed
-
+     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
