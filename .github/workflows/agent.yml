@@ -15,6 +15,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+      workflows: write # Fixed: Perms to push workflow changes if needed
 
     steps:
       - name: Checkout code
@@ -35,7 +36,7 @@ jobs:
         run: |
           ISSUE_DATA=$(gh issue list --search "state:open sort:created-asc" --limit 1 --json number,title,body)
           if [ "$ISSUE_DATA" == "[]" ] || [ -z "$ISSUE_DATA" ]; then
-            echo "No open issues found. Skipping fix step."
+            echo "No open issues found."
             echo "run_fix=false" >> $GITHUB_OUTPUT
           else
             echo "run_fix=true" >> $GITHUB_OUTPUT
@@ -50,20 +51,17 @@ jobs:
 
       - name: Run Gemini Agent (Fix Issue)
         if: steps.fetch-issue.outputs.run_fix == 'true'
-        id: gemini-run
         uses: google-github-actions/run-gemini-cli@v0.1.21
-        timeout-minutes: 1 # 1-minute timeout added here
+        timeout-minutes: 1
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           gemini_model: gemini-3.1-flash-lite-preview
           prompt: |
-            You are an expert engineer. Fix this issue:
-            #${{ steps.fetch-issue.outputs.number }}: ${{ steps.fetch-issue.outputs.title }}
+            You are an expert engineer. Fix this issue by editing files:
+            Issue #${{ steps.fetch-issue.outputs.number }}: ${{ steps.fetch-issue.outputs.title }}
             ${{ steps.fetch-issue.outputs.body }}
             
-            Rules: Minimal changes, no git commands, do not touch .github/workflows/.
-
-      # ... [Token Usage and PR Creation logic stays the same] ...
+            Rules: Minimal changes, no git commands.
 
       - name: Create Pull Request
         if: steps.fetch-issue.outputs.run_fix == 'true'
@@ -72,34 +70,37 @@ jobs:
           ISSUE_NUMBER: ${{ steps.fetch-issue.outputs.number }}
           ISSUE_TITLE: ${{ steps.fetch-issue.outputs.title }}
         run: |
-          # [Your existing PR logic here...]
-          # (Ensure this script finishes by pushing the branch and opening the PR)
+          if [ -n "$(git status --porcelain)" ]; then
+            BRANCH_NAME="gemini-fix-issue-${ISSUE_NUMBER}"
+            git config --global user.name "Gemini Agent"
+            git config --global user.email "agent@gemini.ai"
+            git checkout -b "$BRANCH_NAME"
+            git add .
+            git commit -m "fix: resolve #${ISSUE_NUMBER}"
+            git push origin "$BRANCH_NAME" --force
+            gh pr create --title "fix: #${ISSUE_NUMBER} — ${ISSUE_TITLE}" --body "Closes #${ISSUE_NUMBER}" --base main --head "$BRANCH_NAME" || echo "PR already exists"
+          fi
 
-      - name: Gemini Visionary (Generate New Idea)
-        id: gemini-vision
+      - name: Gemini Visionary (Brainstorm New Idea)
         uses: google-github-actions/run-gemini-cli@v0.1.21
-        timeout-minutes: 1 # 1-minute timeout
+        timeout-minutes: 1
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           gemini_model: gemini-3.1-flash-lite-preview
           prompt: |
-            Review the current codebase structure and suggest ONE high-value improvement, feature, or refactor.
-            Output ONLY a JSON object with "title" and "body" keys. 
-            Keep the suggestion technical and specific to this project.
-            
-            Files in repo:
-            $(find . -maxdepth 2 -not -path '*/.*')
+            Analyze this repo and suggest ONE specific technical improvement or new feature.
+            Return ONLY a JSON object: {"title": "...", "body": "..."}
+            Repo Context: $(find . -maxdepth 2 -not -path '*/.*')
 
       - name: Open New Issue for Idea
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Extract JSON from Gemini output
-          IDEA_JSON=$(cat gemini-artifacts/stdout.log | grep -o '{.*}')
-          NEW_TITLE=$(echo "$IDEA_JSON" | jq -r '.title')
-          NEW_BODY=$(echo "$IDEA_JSON" | jq -r '.body')
-          
-          if [ -n "$NEW_TITLE" ] && [ "$NEW_TITLE" != "null" ]; then
-            gh issue create --title "💡 Idea: $NEW_TITLE" --body "$NEW_BODY" --label "enhancement"
-            echo "New idea proposed: $NEW_TITLE"
+          # Robust JSON extraction to avoid "stderr not valid JSON" issues
+          if [ -f "gemini-artifacts/stdout.log" ]; then
+            IDEA_JSON=$(grep -o '{.*}' gemini-artifacts/stdout.log | head -n 1)
+            NEW_TITLE=$(echo "$IDEA_JSON" | jq -r '.title // empty')
+            if [ -n "$NEW_TITLE" ]; then
+              gh issue create --title "💡 Idea: $NEW_TITLE" --body "$(echo "$IDEA_JSON" | jq -r '.body')" --label "enhancement"
+            fi
           fi
