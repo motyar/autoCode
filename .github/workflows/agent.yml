@@ -15,7 +15,6 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-      workflows: write # Added to resolve the "remote rejected" error
 
     steps:
       - name: Checkout code
