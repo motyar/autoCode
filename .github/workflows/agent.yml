@@ -51,7 +51,7 @@ jobs:
       - name: Run Gemini Agent (Fix Issue)
         if: steps.fetch-issue.outputs.run_fix == 'true'
         uses: google-github-actions/run-gemini-cli@v0.1.21
-        timeout-minutes: 1
+        timeout-minutes: 5
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           gemini_model: gemini-3.1-flash-lite-preview
