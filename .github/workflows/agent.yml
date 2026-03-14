@@ -80,28 +80,42 @@ jobs:
             gh pr create --title "fix: #${ISSUE_NUMBER} — ${ISSUE_TITLE}" --body "Closes #${ISSUE_NUMBER}" --base main --head "$BRANCH_NAME" || echo "PR already exists"
           fi
 
+      - name: Prepare Repo Context
+        id: repo-context
+        run: |
+          # Create a list of files to help Gemini understand the project structure
+          echo "FILES_LIST=$(find . -maxdepth 2 -not -path '*/.*' | tr '\n' ' ')" >> $GITHUB_ENV
+
       - name: Gemini Visionary (Brainstorm New Idea)
         uses: google-github-actions/run-gemini-cli@v0.1.21
-        timeout-minutes: 1
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           gemini_model: gemini-3.1-flash-lite-preview
           prompt: |
-            Analyze this repo and suggest ONE specific technical improvement or new feature.
-            Return ONLY a JSON object: {"title": "...", "body": "..."}
-            Repo Context: $(find . -maxdepth 2 -not -path '*/.*')
+            Analyze this repo structure and suggest ONE specific technical improvement or new feature.
+            Repo Context (Files): ${{ env.FILES_LIST }}
+
+            IMPORTANT: Return ONLY a raw JSON object. Do NOT use markdown code blocks (no ```json).
+            Format: {"title": "...", "body": "..."}
 
       - name: Open New Issue for Idea
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Robust JSON extraction to avoid "stderr not valid JSON" issues
           if [ -f "gemini-artifacts/stdout.log" ]; then
-            IDEA_JSON=$(grep -o '{.*}' gemini-artifacts/stdout.log | head -n 1 || true)
-            if [ -n "$IDEA_JSON" ] && echo "$IDEA_JSON" | jq -e . >/dev/null 2>&1; then
+            # Use python or a more robust way to extract JSON if Gemini includes text before/after
+            # This script pulls the first valid JSON object it finds in the log
+            IDEA_JSON=$(python3 -c "import json, re, sys; content = open('gemini-artifacts/stdout.log').read(); match = re.search(r'\{.*\}', content, re.DOTALL); print(match.group(0)) if match else sys.exit(1)") || true
+            
+            if [ -n "$IDEA_JSON" ]; then
               NEW_TITLE=$(echo "$IDEA_JSON" | jq -r '.title // empty')
+              NEW_BODY=$(echo "$IDEA_JSON" | jq -r '.body // empty')
+              
               if [ -n "$NEW_TITLE" ]; then
-                gh issue create --title "💡 Idea: $NEW_TITLE" --body "$(echo "$IDEA_JSON" | jq -r '.body')" --label "enhancement"
+                gh issue create --title "💡 Idea: $NEW_TITLE" --body "$NEW_BODY" --label "enhancement"
               fi
+            else
+              echo "Error: Could not find valid JSON in Gemini output."
+              cat gemini-artifacts/stdout.log # Debugging
             fi
           fi
