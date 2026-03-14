@@ -7,26 +7,42 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GEMINI_MODEL: gemini-2.0-flash-lite
+  GEMINI_CLI_VERSION: "0.1.21"
 
 jobs:
   run-gemini-agent:
+    # Prevent infinite loop: skip when a bot opens an issue (e.g. the visionary step)
+    if: github.event_name == 'workflow_dispatch' || github.event.issue.user.type != 'Bot'
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
       issues: write
-     
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Environment
+      - name: Cache Gemini CLI
+        id: cache-gemini
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm-global
+          # Bump the version suffix (e.g. v2, v3) to force a fresh install
+          key: gemini-cli-${{ runner.os }}-${{ env.GEMINI_CLI_VERSION }}
+
+      - name: Setup Environment & Install Gemini CLI
         run: |
-          mkdir -p /home/runner/.gemini
-          chmod 777 /home/runner/.gemini
-          git rm --cached box5 || true
+          mkdir -p ~/.gemini ~/.npm-global
+          npm config set prefix ~/.npm-global
+          echo "$HOME/.npm-global/bin" >> $GITHUB_PATH
+          if [ "${{ steps.cache-gemini.outputs.cache-hit }}" != "true" ]; then
+            npm install -g @google/gemini-cli@${{ env.GEMINI_CLI_VERSION }}
+          fi
+          git rm --cached box5 2>/dev/null || true
 
       - name: Fetch Oldest Issue
         id: fetch-issue
@@ -54,12 +70,12 @@ jobs:
         timeout-minutes: 5
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
-          gemini_model: gemini-3.1-flash-lite-preview
+          gemini_model: ${{ env.GEMINI_MODEL }}
           prompt: |
             You are an expert engineer. Fix this issue by editing files:
             Issue #${{ steps.fetch-issue.outputs.number }}: ${{ steps.fetch-issue.outputs.title }}
             ${{ steps.fetch-issue.outputs.body }}
-            
+
             Rules: Minimal changes, no git commands.
 
       - name: Create Pull Request
@@ -77,45 +93,102 @@ jobs:
             git add .
             git commit -m "fix: resolve #${ISSUE_NUMBER}"
             git push origin "$BRANCH_NAME" --force
-            gh pr create --title "fix: #${ISSUE_NUMBER} — ${ISSUE_TITLE}" --body "Closes #${ISSUE_NUMBER}" --base main --head "$BRANCH_NAME" || echo "PR already exists"
+            gh pr create \
+              --title "fix: #${ISSUE_NUMBER} — ${ISSUE_TITLE}" \
+              --body "Closes #${ISSUE_NUMBER}" \
+              --base main \
+              --head "$BRANCH_NAME" || echo "PR already exists"
+          else
+            echo "No file changes for issue #${ISSUE_NUMBER}; skipping PR."
           fi
-
-      - name: Prepare Repo Context
-        id: repo-context
-        run: |
-          # Create a list of files to help Gemini understand the project structure
-          echo "FILES_LIST=$(find . -maxdepth 2 -not -path '*/.*' | tr '\n' ' ')" >> $GITHUB_ENV
 
       - name: Gemini Visionary (Brainstorm New Idea)
-        uses: google-github-actions/run-gemini-cli@v0.1.21
-        with:
-          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
-          gemini_model: gemini-3.1-flash-lite-preview
-          prompt: |
-            Analyze this repo structure and suggest ONE specific technical improvement or new feature.
-            Repo Context (Files): ${{ env.FILES_LIST }}
+        id: visionary
+        timeout-minutes: 3
+        continue-on-error: true
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          FILES_LIST=$(find . -maxdepth 2 -not -path '*/.*' | tr '\n' ' ')
+          export FILES_LIST
 
-            IMPORTANT: Return ONLY a raw JSON object. Do NOT use markdown code blocks (no ```json).
-            Format: {"title": "...", "body": "..."}
+          # Call the Gemini REST API directly — no second CLI install needed
+          cat > /tmp/visionary_call.py << 'PYEOF'
+          import json, subprocess, os, sys, re
+
+          files_list = os.environ.get('FILES_LIST', '')
+          api_key    = os.environ.get('GEMINI_API_KEY', '')
+          model      = os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash-lite')
+
+          prompt = (
+              "Analyze this repo structure and suggest ONE specific technical improvement or new feature.\n"
+              f"Repo Context (Files): {files_list}\n\n"
+              "IMPORTANT: Return ONLY a raw JSON object. "
+              "Do NOT use markdown code blocks (no ```json).\n"
+              'Format: {"title": "...", "body": "..."}'
+          )
+
+          payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]})
+
+          result = subprocess.run(
+              ['curl', '-s', '-X', 'POST',
+               f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}',
+               '-H', 'Content-Type: application/json',
+               '-d', payload],
+              capture_output=True, text=True
+          )
+
+          if result.returncode != 0:
+              print(f"curl error: {result.stderr}", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              response = json.loads(result.stdout)
+              text = response['candidates'][0]['content']['parts'][0]['text']
+          except Exception as e:
+              print(f"Parse error: {e}\nRaw response: {result.stdout}", file=sys.stderr)
+              sys.exit(1)
+
+          # Strip markdown code fences if present, then extract first JSON object
+          text = re.sub(r'```(?:json)?\s*', '', text).strip()
+          match = re.search(r'\{.*\}', text, re.DOTALL)
+          if not match:
+              print(f"No JSON found in response: {text}", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              obj = json.loads(match.group(0))
+              print(json.dumps(obj))
+          except json.JSONDecodeError as e:
+              print(f"Invalid JSON: {e}\nText: {match.group(0)}", file=sys.stderr)
+              sys.exit(1)
+          PYEOF
+
+          IDEA_JSON=$(python3 /tmp/visionary_call.py)
+          echo "idea_json<<IDEA_EOF" >> $GITHUB_OUTPUT
+          echo "$IDEA_JSON" >> $GITHUB_OUTPUT
+          echo "IDEA_EOF" >> $GITHUB_OUTPUT
 
       - name: Open New Issue for Idea
+        if: steps.visionary.outputs.idea_json != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IDEA_JSON: ${{ steps.visionary.outputs.idea_json }}
         run: |
-          if [ -f "gemini-artifacts/stdout.log" ]; then
-            # Use python or a more robust way to extract JSON if Gemini includes text before/after
-            # This script pulls the first valid JSON object it finds in the log
-            IDEA_JSON=$(python3 -c "import json, re, sys; content = open('gemini-artifacts/stdout.log').read(); match = re.search(r'\{.*\}', content, re.DOTALL); print(match.group(0)) if match else sys.exit(1)") || true
-            
-            if [ -n "$IDEA_JSON" ]; then
-              NEW_TITLE=$(echo "$IDEA_JSON" | jq -r '.title // empty')
-              NEW_BODY=$(echo "$IDEA_JSON" | jq -r '.body // empty')
-              
-              if [ -n "$NEW_TITLE" ]; then
-                gh issue create --title "💡 Idea: $NEW_TITLE" --body "$NEW_BODY" --label "enhancement"
-              fi
-            else
-              echo "Error: Could not find valid JSON in Gemini output."
-              cat gemini-artifacts/stdout.log # Debugging
-            fi
+          NEW_TITLE=$(echo "$IDEA_JSON" | jq -r '.title // empty')
+          NEW_BODY=$(echo "$IDEA_JSON" | jq -r '.body // empty')
+
+          if [ -z "$NEW_TITLE" ]; then
+            echo "Empty title; skipping issue creation."
+            exit 0
           fi
+
+          # Ensure the label exists before using it
+          gh label create "enhancement" \
+            --description "New feature or request" \
+            --color "a2eeef" || true
+
+          gh issue create \
+            --title "💡 Idea: $NEW_TITLE" \
+            --body "$NEW_BODY" \
+            --label "enhancement"
