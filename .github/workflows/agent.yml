@@ -97,9 +97,11 @@ jobs:
         run: |
           # Robust JSON extraction to avoid "stderr not valid JSON" issues
           if [ -f "gemini-artifacts/stdout.log" ]; then
-            IDEA_JSON=$(grep -o '{.*}' gemini-artifacts/stdout.log | head -n 1)
-            NEW_TITLE=$(echo "$IDEA_JSON" | jq -r '.title // empty')
-            if [ -n "$NEW_TITLE" ]; then
-              gh issue create --title "💡 Idea: $NEW_TITLE" --body "$(echo "$IDEA_JSON" | jq -r '.body')" --label "enhancement"
+            IDEA_JSON=$(grep -o '{.*}' gemini-artifacts/stdout.log | head -n 1 || true)
+            if [ -n "$IDEA_JSON" ] && echo "$IDEA_JSON" | jq -e . >/dev/null 2>&1; then
+              NEW_TITLE=$(echo "$IDEA_JSON" | jq -r '.title // empty')
+              if [ -n "$NEW_TITLE" ]; then
+                gh issue create --title "💡 Idea: $NEW_TITLE" --body "$(echo "$IDEA_JSON" | jq -r '.body')" --label "enhancement"
+              fi
             fi
           fi
