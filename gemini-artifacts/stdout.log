@@ -1,0 +1,94 @@
+{
+  "session_id": "362d7f75-2625-40b6-bce2-78827c935cc8",
+  "response": "The project now includes a roadmap for tracking development, fulfilling the requirement for a new feature.",
+  "stats": {
+    "models": {
+      "gemini-3.1-flash-lite-preview": {
+        "api": {
+          "totalRequests": 5,
+          "totalErrors": 0,
+          "totalLatencyMs": 4338
+        },
+        "tokens": {
+          "input": 17199,
+          "prompt": 49583,
+          "candidates": 307,
+          "total": 49890,
+          "cached": 32384,
+          "thoughts": 0,
+          "tool": 0
+        },
+        "roles": {
+          "main": {
+            "totalRequests": 5,
+            "totalErrors": 0,
+            "totalLatencyMs": 4338,
+            "tokens": {
+              "input": 17199,
+              "prompt": 49583,
+              "candidates": 307,
+              "total": 49890,
+              "cached": 32384,
+              "thoughts": 0,
+              "tool": 0
+            }
+          }
+        }
+      }
+    },
+    "tools": {
+      "totalCalls": 4,
+      "totalSuccess": 4,
+      "totalFail": 0,
+      "totalDurationMs": 15,
+      "totalDecisions": {
+        "accept": 4,
+        "reject": 0,
+        "modify": 0,
+        "auto_accept": 0
+      },
+      "byName": {
+        "read_file": {
+          "count": 1,
+          "success": 1,
+          "fail": 0,
+          "durationMs": 7,
+          "decisions": {
+            "accept": 1,
+            "reject": 0,
+            "modify": 0,
+            "auto_accept": 0
+          }
+        },
+        "write_todos": {
+          "count": 2,
+          "success": 2,
+          "fail": 0,
+          "durationMs": 2,
+          "decisions": {
+            "accept": 2,
+            "reject": 0,
+            "modify": 0,
+            "auto_accept": 0
+          }
+        },
+        "replace": {
+          "count": 1,
+          "success": 1,
+          "fail": 0,
+          "durationMs": 6,
+          "decisions": {
+            "accept": 1,
+            "reject": 0,
+            "modify": 0,
+            "auto_accept": 0
+          }
+        }
+      }
+    },
+    "files": {
+      "totalLinesAdded": 4,
+      "totalLinesRemoved": 0
+    }
+  }
+}
