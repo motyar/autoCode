@@ -1,4 +1,4 @@
-name: Gemini Agent Issue Solver & Visionary
+name: autoCode Agent — Task Runner & Visionary
 
 on:
   workflow_dispatch:
@@ -44,8 +44,106 @@ jobs:
           fi
           git rm --cached box5 2>/dev/null || true
 
+      # ── Task System ─────────────────────────────────────────────────────────
+      # Tasks in /tasks/ are the primary work queue.
+      # The agent picks the oldest pending task, executes it using the matching
+      # skill from /gemini/skills/, and saves results to /results/.
+      # If no pending tasks exist, it falls back to the issue-fix workflow.
+      # ────────────────────────────────────────────────────────────────────────
+
+      - name: Find Next Pending Task
+        id: find-task
+        run: |
+          TASK_FILE=$(grep -irl "\*\*Status:\*\* pending" tasks/ 2>/dev/null | sort | head -1)
+          if [ -z "$TASK_FILE" ]; then
+            echo "No pending tasks found — will fall back to issue workflow."
+            echo "run_task=false" >> $GITHUB_OUTPUT
+          else
+            echo "run_task=true" >> $GITHUB_OUTPUT
+            echo "task_file=$TASK_FILE" >> $GITHUB_OUTPUT
+            TASK_NAME=$(basename "$TASK_FILE" .md)
+            echo "task_name=$TASK_NAME" >> $GITHUB_OUTPUT
+            # Extract task type for skill loading (research/engineering/marketing/analysis)
+            TASK_TYPE=$(grep -i '\*\*Type:\*\*' "$TASK_FILE" | head -1 \
+              | sed 's/.*\*\*Type:\*\* *//' | tr '[:upper:]' '[:lower:]' | tr -d '\r ')
+            echo "task_type=${TASK_TYPE:-research}" >> $GITHUB_OUTPUT
+            {
+              echo "task_content<<TASK_EOF"
+              cat "$TASK_FILE"
+              echo "TASK_EOF"
+            } >> $GITHUB_OUTPUT
+            echo "Found task: $TASK_FILE (type: ${TASK_TYPE:-research})"
+          fi
+
+      - name: Load Project Context
+        id: load-context
+        if: steps.find-task.outputs.run_task == 'true'
+        run: |
+          MISSION=$(cat context/project/mission.md 2>/dev/null \
+            || echo "autoCode: An AI-powered autonomous development system.")
+          LEARNINGS=$(cat context/memory/learnings.md 2>/dev/null \
+            || echo "No learnings recorded yet.")
+          SKILL_FILE="gemini/skills/${{ steps.find-task.outputs.task_type }}.md"
+          SKILL=$(cat "$SKILL_FILE" 2>/dev/null \
+            || echo "Use best practices for this task type.")
+          {
+            echo "mission<<CTX_EOF"
+            echo "$MISSION"
+            echo "CTX_EOF"
+          } >> $GITHUB_OUTPUT
+          {
+            echo "learnings<<LEARN_EOF"
+            echo "$LEARNINGS"
+            echo "LEARN_EOF"
+          } >> $GITHUB_OUTPUT
+          {
+            echo "skill<<SKILL_EOF"
+            echo "$SKILL"
+            echo "SKILL_EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Run Gemini Agent (Execute Task)
+        if: steps.find-task.outputs.run_task == 'true'
+        uses: google-github-actions/run-gemini-cli@v0.1.21
+        timeout-minutes: 5
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          gemini_model: ${{ env.GEMINI_MODEL }}
+          prompt: |
+            You are an autonomous AI agent for the autoCode project. Complete the task below.
+
+            ## PROJECT MISSION
+            ${{ steps.load-context.outputs.mission }}
+
+            ## PREVIOUS LEARNINGS
+            ${{ steps.load-context.outputs.learnings }}
+
+            ## SKILL INSTRUCTIONS
+            ${{ steps.load-context.outputs.skill }}
+
+            ## CURRENT TASK
+            File: ${{ steps.find-task.outputs.task_file }}
+
+            ${{ steps.find-task.outputs.task_content }}
+
+            ## YOUR INSTRUCTIONS
+            1. Follow the skill instructions above for this task type.
+            2. Complete the task thoroughly and professionally.
+            3. Save your full output/results to: results/${{ steps.find-task.outputs.task_name }}.md
+            4. In the task file (${{ steps.find-task.outputs.task_file }}), change "**Status:** pending"
+               to "**Status:** completed" and append a line "**Completed:** {today's date in YYYY-MM-DD}".
+            5. Append 1-3 key learnings to context/memory/learnings.md using the format:
+               "- `{date}` | `{task-type}` | {one-sentence learning}"
+
+            Rules: Be thorough. Save all outputs as Markdown files. No git commands.
+
+      # ── Fallback: Issue Workflow ─────────────────────────────────────────────
+      # Only runs when no pending tasks are found in /tasks/.
+      # ────────────────────────────────────────────────────────────────────────
+
       - name: Fetch Oldest Issue
         id: fetch-issue
+        if: steps.find-task.outputs.run_task != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -65,7 +163,7 @@ jobs:
           fi
 
       - name: Run Gemini Agent (Fix Issue)
-        if: steps.fetch-issue.outputs.run_fix == 'true'
+        if: steps.find-task.outputs.run_task != 'true' && steps.fetch-issue.outputs.run_fix == 'true'
         uses: google-github-actions/run-gemini-cli@v0.1.21
         timeout-minutes: 5
         with:
@@ -79,38 +177,62 @@ jobs:
             Rules: Minimal changes, no git commands.
 
       - name: Create Pull Request
-        if: steps.fetch-issue.outputs.run_fix == 'true'
+        if: steps.find-task.outputs.run_task == 'true' || steps.fetch-issue.outputs.run_fix == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.fetch-issue.outputs.number }}
           ISSUE_TITLE: ${{ steps.fetch-issue.outputs.title }}
+          TASK_NAME: ${{ steps.find-task.outputs.task_name }}
+          TASK_FILE: ${{ steps.find-task.outputs.task_file }}
         run: |
           if [ -n "$(git status --porcelain)" ]; then
-            BRANCH_NAME="gemini-fix-issue-${ISSUE_NUMBER}"
-            git config --global user.name "Gemini Agent"
-            git config --global user.email "agent@gemini.ai"
+            git config --global user.name "autoCode Agent"
+            git config --global user.email "agent@autocode.ai"
+            if [ -n "$TASK_NAME" ]; then
+              BRANCH_NAME="autocode-task-${TASK_NAME}"
+              COMMIT_MSG="task: complete ${TASK_NAME}"
+              PR_TITLE="✅ task: ${TASK_NAME}"
+              PR_BODY=$(printf '## Task Completed: `%s`\n\nExecuted task from `%s`.\nResults saved to `results/%s.md`.\n\n---\n*Completed autonomously by autoCode Agent*' \
+                "$TASK_NAME" "$TASK_FILE" "$TASK_NAME")
+            else
+              BRANCH_NAME="gemini-fix-issue-${ISSUE_NUMBER}"
+              COMMIT_MSG="fix: resolve #${ISSUE_NUMBER}"
+              PR_TITLE="fix: #${ISSUE_NUMBER} — ${ISSUE_TITLE}"
+              PR_BODY="Closes #${ISSUE_NUMBER}"
+            fi
             git checkout -b "$BRANCH_NAME"
             git add .
-            git commit -m "fix: resolve #${ISSUE_NUMBER}"
+            git commit -m "$COMMIT_MSG"
             git push origin "$BRANCH_NAME" --force
             gh pr create \
-              --title "fix: #${ISSUE_NUMBER} — ${ISSUE_TITLE}" \
-              --body "Closes #${ISSUE_NUMBER}" \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY" \
               --base main \
               --head "$BRANCH_NAME" || echo "PR already exists"
           else
-            echo "No file changes for issue #${ISSUE_NUMBER}; skipping PR."
+            echo "No file changes; skipping PR."
           fi
 
-      - name: Gemini Visionary (Brainstorm New Idea)
+      # ── Visionary: Plan & Queue Next Task ───────────────────────────────────
+      # Analyzes the project state and queues the next task as a .md file in
+      # /tasks/ — pushing it directly to main via the GitHub Contents API.
+      # This keeps the autonomous loop running indefinitely.
+      # ────────────────────────────────────────────────────────────────────────
+
+      - name: Gemini Visionary (Plan Next Task)
         id: visionary
         timeout-minutes: 3
         continue-on-error: true
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          FILES_LIST=$(find . -maxdepth 2 -not -path '*/.*' | tr '\n' ' ')
-          export FILES_LIST
+          MISSION=$(cat context/project/mission.md 2>/dev/null \
+            || echo "autoCode: AI-powered autonomous development system")
+          COMPLETED=$(grep -irl "\*\*Status:\*\* completed" tasks/ 2>/dev/null | wc -l | tr -d ' ')
+          PENDING=$(grep -irl "\*\*Status:\*\* pending" tasks/ 2>/dev/null | wc -l | tr -d ' ')
+          RESULTS=$(ls results/*.md 2>/dev/null | grep -v '.gitkeep' | head -5 | tr '\n' ' ')
+          FILES_LIST=$(find . -maxdepth 3 -not -path '*/.*' -name '*.md' | tr '\n' ' ')
+          export MISSION COMPLETED PENDING RESULTS FILES_LIST
 
           # Call the Gemini REST API directly — no second CLI install needed
           cat > /tmp/visionary_call.py << 'PYEOF'
@@ -119,13 +241,26 @@ jobs:
           files_list = os.environ.get('FILES_LIST', '')
           api_key    = os.environ.get('GEMINI_API_KEY', '')
           model      = os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash-lite')
+          mission    = os.environ.get('MISSION', '')
+          completed  = os.environ.get('COMPLETED', '0')
+          pending    = os.environ.get('PENDING', '0')
+          results    = os.environ.get('RESULTS', '')
 
           prompt = (
-              "Analyze this repo structure and suggest ONE specific technical improvement or new feature.\n"
-              f"Repo Context (Files): {files_list}\n\n"
-              "IMPORTANT: Return ONLY a raw JSON object. "
-              "Do NOT use markdown code blocks (no ```json).\n"
-              'Format: {"title": "...", "body": "..."}'
+              f"You are the CEO Agent for autoCode.\n\n"
+              f"MISSION: {mission}\n\n"
+              f"PROJECT STATUS:\n"
+              f"- Tasks completed: {completed}\n"
+              f"- Tasks pending: {pending}\n"
+              f"- Recent result files: {results}\n"
+              f"- Repo markdown files: {files_list}\n\n"
+              "Analyze the project state and suggest ONE specific, valuable next task.\n"
+              "It should logically follow from completed work and advance the project mission.\n\n"
+              "IMPORTANT: Return ONLY a raw JSON object. No markdown code blocks.\n"
+              'Format: {"title": "short task title (max 50 chars)", '
+              '"type": "research|engineering|marketing|analysis", '
+              '"description": "2-3 sentence description of what to do", '
+              '"expected_output": "what file/artifact should be produced"}'
           )
 
           payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]})
@@ -169,26 +304,101 @@ jobs:
           echo "$IDEA_JSON" >> $GITHUB_OUTPUT
           echo "IDEA_EOF" >> $GITHUB_OUTPUT
 
-      - name: Open New Issue for Idea
+      - name: Queue Next Task
         if: steps.visionary.outputs.idea_json != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IDEA_JSON: ${{ steps.visionary.outputs.idea_json }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          NEW_TITLE=$(echo "$IDEA_JSON" | jq -r '.title // empty')
-          NEW_BODY=$(echo "$IDEA_JSON" | jq -r '.body // empty')
+          TASK_TITLE=$(echo "$IDEA_JSON" | jq -r '.title // empty')
+          TASK_TYPE=$(echo "$IDEA_JSON" | jq -r '.type // "research"')
+          TASK_DESC=$(echo "$IDEA_JSON" | jq -r '.description // empty')
+          TASK_OUTPUT=$(echo "$IDEA_JSON" | jq -r '.expected_output // empty')
 
-          if [ -z "$NEW_TITLE" ]; then
-            echo "Empty title; skipping issue creation."
+          if [ -z "$TASK_TITLE" ]; then
+            echo "Empty title; skipping task creation."
             exit 0
           fi
 
-          # Ensure the label exists before using it
-          gh label create "enhancement" \
-            --description "New feature or request" \
-            --color "a2eeef" || true
+          # Generate sequential task number and URL-safe slug
+          TASK_COUNT=$(find tasks/ -name 'task_*.md' 2>/dev/null | wc -l | tr -d ' ')
+          TASK_NUM=$(printf "%03d" $((TASK_COUNT + 1)))
+          TASK_SLUG=$(echo "$TASK_TITLE" \
+            | tr '[:upper:]' '[:lower:]' \
+            | tr -cs 'a-z0-9' '_' \
+            | sed 's/_*$//' \
+            | cut -c1-40)
+          TASK_FILENAME="tasks/task_${TASK_NUM}_${TASK_SLUG}.md"
+          TODAY=$(date -u +"%Y-%m-%d")
 
-          gh issue create \
-            --title "💡 Idea: $NEW_TITLE" \
-            --body "$NEW_BODY" \
-            --label "enhancement"
+          # Export variables so the Python script can read them as env vars
+          export TASK_TITLE TASK_TYPE TASK_DESC TASK_OUTPUT TASK_FILENAME TASK_SLUG TASK_NUM TODAY
+
+          # Build task file content and push to main via GitHub Contents API.
+          # Python constructs the markdown using string joins to avoid YAML-breaking
+          # multiline literals in the heredoc.
+          python3 - << 'PYEOF'
+          import base64, subprocess, os, sys
+
+          title    = os.environ['TASK_TITLE']
+          ttype    = os.environ['TASK_TYPE']
+          desc     = os.environ['TASK_DESC']
+          output   = os.environ['TASK_OUTPUT']
+          filename = os.environ['TASK_FILENAME']
+          slug     = os.environ['TASK_SLUG']
+          num      = os.environ['TASK_NUM']
+          today    = os.environ['TODAY']
+          repo     = os.environ['GITHUB_REPOSITORY']
+
+          # Build markdown line-by-line to avoid multiline string literals
+          lines = [
+              "# Task: " + title,
+              "",
+              "**Status:** pending",
+              "**Type:** " + ttype,
+              "**Priority:** medium",
+              "**Created:** " + today,
+              "",
+              "## Description",
+              desc,
+              "",
+              "## Expected Output",
+              output,
+              "",
+              "## Instructions",
+              "1. Use the skill from `gemini/skills/" + ttype + ".md` to guide this work.",
+              "2. Save your full output to `results/task_" + num + "_" + slug + ".md`.",
+              "3. Update this file: change `**Status:** pending` to `**Status:** completed`"
+                  + " and add `**Completed:** {date}`.",
+              "4. Append 1-3 key learnings to `context/memory/learnings.md`.",
+              "",
+          ]
+          content = "\n".join(lines) + "\n"
+
+          encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+
+          # Check if the file already exists (avoid duplicates)
+          check = subprocess.run(
+              ["gh", "api", "/repos/" + repo + "/contents/" + filename, "--jq", ".sha"],
+              capture_output=True, text=True
+          )
+          if check.returncode == 0 and check.stdout.strip():
+              print("Task file already exists: " + filename + " — skipping.")
+              sys.exit(0)
+
+          # Push the new task file directly to main via GitHub Contents API
+          result = subprocess.run(
+              ["gh", "api",
+               "--method", "PUT",
+               "/repos/" + repo + "/contents/" + filename,
+               "-f", "message=task: queue — " + title,
+               "-f", "content=" + encoded,
+               "-f", "branch=main"],
+              capture_output=True, text=True
+          )
+          if result.returncode == 0:
+              print("Queued next task: " + filename)
+          else:
+              print("Warning: could not queue task: " + result.stderr, file=sys.stderr)
+          PYEOF
